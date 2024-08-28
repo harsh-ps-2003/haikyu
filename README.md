@@ -1,65 +1,27 @@
-# haikyu
+# Haikyu
 
-A Bitcoin Miner from scratch!
-simulation of mining process of a block, which includes validating and including transactions from a given set of transactions in the mempool.
+Haikyu is a Bitcoin miner simulation that demonstrates the process of mining a block, including transaction validation and selection from a mempool.
 
-**this was a challenge for Summer of Bitcoin 2024**
+## Quick Setup Guide
 
-## Quick guide to setup
-
-<ins>DB used</ins>
-- sqlite3
+### Prerequisites
+- Go 1.16 or later
+- SQLite3
 
 ### Setup
-- run the script 
+Run the following script:
 ```shell
 chmod +x run.sh
-./run.sh #check info.log for results
-``` 
-
-# Deep Dive
-Table of Contents
-- [Folder Structure](#folder-structure)
-- [workflow explanation](#workflow-explanation)
-    - [Loading transactions](#initialize-and-load-txs-into-mempool)
-    - [Block Building](#block-building-with-miner-service)
-    - [Block Mining](#coinbase-tx-construction-and-block-mining)
-- [why and how of Sqlite](#why-sqlite-and-how-of-sqlite)
-- benchmarking
-- [score card](#score-card)
-- [Additional Information](#additional-information)
-- [Terminology](#Terminology)
-
-## Folder Structure
-```shell
-│   config.go         // configurations
-│   output.txt
-│   test.db           // sqlite3 DB to store txs and their outpoints after processing
-├───cmd
-│   │ -- main.go      // entrypoint for the application
-├───internal
-│   ├───ierrors       // custom errors definitions
-│   ├───mempool       // transaction validation checks and storing in DB
-│   ├───miner         // transaction selection, block mining and building
-│   └───path          // registry for Path to `db` , `mempool` data and `output.txt` file
-├───pkg
-│   ├───address
-│   ├───block         // contains `BLOCK` structs
-│   ├───encoding      // Handles little endian Bytes and Compact Size conversions
-│   ├───opcode        //contains a registry of OP_CODES and their byteCodes
-│   ├───script // handles script verification
-│   └───transaction   // includes Database Models Transaction,Inputs and Outpoints
+./run.sh 
+#check info.log for results
 ```
-Common functionalities are placed in the pkg directory, promoting code reuse.
-
-
 
 # Workflow explanation
 This project has 3 phases of execution in total as described below
 ### Initialize and Load Txs into [mempool](./internal/mempool/mempool.go)  
 entrypoint `main.go` starts by initializing a progressBar which logs number of files processed to stdout, a logger[info level] which is passed down to `miner` and `mempool` services. `main.go` panics on any error occurred during intilizalitation processes. Initialization creates 3 SQL tables For `Transactions` `Inputs` and `OutPoints`
 
-Once mempool is Loaded, entrypoints spins up several `go routines` to load transactions concurrently and save it to db, mempool does several checks on transaction data followed by putting tx into db and those checks are described as below
+Once mempool is Loaded, entrypoints spins up several `go routines` to load transactions concurrently and save it to db, mempool does several checks on transaction data followed by putting tx into db, these checks are described as below
 1. Computes `Txhash` of entire transaction. by `SHA256(SHA256(legacy_tx_serialization))` in Little Endian Format.  legacy_tx_serialization is just a tx serialized without `marker` `flag` and `witness`.
 2. Computes `Wtxid` of entire transaction. by `SHA256(SHA256(wtxid serialization))`.
 3. Computes `Weight` and `FeeCollected` of entire transaction. by 

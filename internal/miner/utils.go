@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 )
 
+// GenerateMerkleRoot calculates the Merkle root from a list of transaction IDs.
 func GenerateMerkleRoot(txids []string) string {
 	if len(txids) == 0 {
 		return ""
@@ -31,6 +32,7 @@ func GenerateMerkleRoot(txids []string) string {
 	return txids[0]
 }
 
+// reverse reverses the order of bytes in a byte slice.
 func reverse(b []byte) []byte {
 	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
 		b[i], b[j] = b[j], b[i]
@@ -38,6 +40,7 @@ func reverse(b []byte) []byte {
 	return b
 }
 
+// HexMustDecode decodes a hexadecimal string to bytes, panicking on error.
 func HexMustDecode(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -46,6 +49,7 @@ func HexMustDecode(s string) []byte {
 	return b
 }
 
+// Hash256 performs a double SHA256 hash on the input string and returns the result as a hexadecimal string.
 func Hash256(input string) string {
 	// First hash
 	hasher := sha256.New()

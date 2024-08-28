@@ -22,28 +22,29 @@ import (
 	gormLogger "gorm.io/gorm/logger"
 )
 
+const (
+	cpuProfileFile   = "cpuprofile"
+	rejectedTxFile   = "rejected_transactions.txt"
+	progressBarWidth = 50
+	updateInterval   = 1000
+)
+
+// ProgressBar represents a progress bar for displaying task completion.
 type ProgressBar struct {
 	Total   int
 	Current int
 	rate    string
 }
 
+// Play updates and displays the progress bar.
 func (p *ProgressBar) Play(cur int) {
 	percent := float64(cur) / float64(p.Total) * 100
-	fmt.Printf("\r[%-50s]%3d%% %8d/%d", strings.Repeat("#", int(percent/2)), uint(percent), cur, p.Total)
+	fmt.Printf("\r[%-*s]%3d%% %8d/%d", progressBarWidth, strings.Repeat("#", int(percent/2)), uint(percent), cur, p.Total)
 }
 
 func main() {
-
-	f, err := os.Create("cpuprofile")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer f.Close()
+	setupProfiling()
 	defer pprof.StopCPUProfile()
-
-	pprof.StartCPUProfile(f)
 
 	os.Remove(path.DBPath)
 
@@ -53,22 +54,41 @@ func main() {
 		}
 	}()
 
+	logger := setupLogger()
+	pool := initializeMempool(logger)
+	processTransactionFiles(pool, logger)
+	startMiner(pool, logger)
+}
+
+// setupProfiling initializes CPU profiling.
+func setupProfiling() {
+	f, err := os.Create(cpuProfileFile)
+	if err != nil {
+		fmt.Println("Error creating CPU profile:", err)
+		return
+	}
+	pprof.StartCPUProfile(f)
+}
+
+// setupLogger configures and returns a logrus logger.
+func setupLogger() *logrus.Logger {
 	logger := logrus.New()
-	// logger.SetLevel(logrus.InfoLevel)
 	logger.SetLevel(logrus.PanicLevel)
 	logger.Formatter = &logrus.TextFormatter{
 		DisableColors: false,
 		ForceColors:   true,
 	}
+	return logger
+}
 
+// initializeMempool sets up and returns a new mempool instance.
+func initializeMempool(logger *logrus.Logger) mempool.Mempool {
 	mempoolConfig := mempool.Opts{
 		MaxMemPoolSize: config.MaxMemPoolSize,
 		Logger:         logger,
-
-		Dust: uint64(config.Dust),
+		Dust:           uint64(config.Dust),
 	}
 
-	// init mempool
 	pool, err := mempool.New(sqlite.Open(path.DBPath), mempoolConfig, &gorm.Config{
 		NowFunc:                func() time.Time { return time.Now().UTC() },
 		Logger:                 gormLogger.Default.LogMode(gormLogger.Silent),
@@ -79,17 +99,20 @@ func main() {
 		panic(err)
 	}
 
-	logger.Info("mempool initialized")
+	logger.Info("Mempool initialized")
+	return pool
+}
 
-	// loop through all files in ./data/mempool
-	// unmarshal all json objects
+// processTransactionFiles reads and processes transaction files concurrently.
+func processTransactionFiles(pool mempool.Mempool, logger *logrus.Logger) {
 	files, err := os.ReadDir(path.MempoolDataPath)
 	if err != nil {
 		panic(err)
 	}
 
 	totalFiles := len(files)
-	logger.Info("loading ", totalFiles, " files")
+	logger.Info("Loading ", totalFiles, " files")
+
 	pb := &ProgressBar{
 		Total:   totalFiles,
 		Current: 0,
@@ -98,16 +121,9 @@ func main() {
 
 	wg := new(sync.WaitGroup)
 	doneChan := make(chan struct{}, totalFiles)
+	fileChan := make(chan fs.DirEntry, totalFiles)
 
-	rejectedTxFile := "rejected.txt"
-	if _, err := os.Stat(path.Root + "/" + rejectedTxFile); err == nil {
-		os.Remove(path.Root + "/" + rejectedTxFile)
-	}
-
-	rejTxFile, err := os.OpenFile(path.Root+"/"+rejectedTxFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		panic(err)
-	}
+	rejTxFile := setupRejectedTxFile()
 	defer rejTxFile.Close()
 
 	acceptableErrs := []string{
@@ -117,44 +133,50 @@ func main() {
 
 	start := time.Now()
 
-	// Create a channel to distribute files to workers
-	fileChan := make(chan fs.DirEntry, totalFiles)
-
-	// Determine the number of worker goroutines (e.g., number of CPU cores)
 	numWorkers := runtime.NumCPU()
-
-	// Start worker goroutines
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(&pool, fileChan, doneChan, wg, logger, rejTxFile, acceptableErrs)
+		go worker(pool, fileChan, doneChan, wg, logger, rejTxFile, acceptableErrs)
 	}
 
-	// Send files to the channel
 	for _, file := range files {
-		if file.IsDir() && strings.Split(file.Name(), ".")[1] != "json" {
-			logger.Info("skipping ", file.Name())
-			continue
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".json") {
+			fileChan <- file
 		}
-		fileChan <- file
 	}
 	close(fileChan)
 
-	// Track progress
 	for i := 0; i < totalFiles; i++ {
 		<-doneChan
 		pb.Current++
-		if pb.Current%1000 == 0 {
+		if pb.Current%updateInterval == 0 {
 			pb.Play(pb.Current)
 		}
 	}
 
 	fmt.Println("")
-
 	wg.Wait()
 	elapsed := time.Since(start)
-	logger.Info("loaded ", totalFiles, " transactions into Mempool", " in ", elapsed.Seconds(), " seconds")
+	logger.Info("Loaded ", totalFiles, " transactions into Mempool in ", elapsed.Seconds(), " seconds")
+}
 
-	logger.Info("starting miner")
+// setupRejectedTxFile creates and returns a file for storing rejected transaction information.
+func setupRejectedTxFile() *os.File {
+	rejectedFilePath := path.Root + "/" + rejectedTxFile
+	if _, err := os.Stat(rejectedFilePath); err == nil {
+		os.Remove(rejectedFilePath)
+	}
+
+	rejTxFile, err := os.OpenFile(rejectedFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	return rejTxFile
+}
+
+// startMiner initializes and starts the mining process.
+func startMiner(pool mempool.Mempool, logger *logrus.Logger) {
+	logger.Info("Starting miner")
 
 	miner, err := miner.New(pool, miner.Opts{
 		Logger:       logger,
@@ -168,11 +190,10 @@ func main() {
 	if err := miner.Mine(); err != nil {
 		panic(err)
 	}
-
 }
 
-// worker function to process files
-func worker(pool *mempool.Mempool, fileChan <-chan fs.DirEntry, doneChan chan<- struct{}, wg *sync.WaitGroup, logger *logrus.Logger, rejTxFile *os.File, acceptableErrs []string) {
+// worker processes transaction files concurrently.
+func worker(pool mempool.Mempool, fileChan <-chan fs.DirEntry, doneChan chan<- struct{}, wg *sync.WaitGroup, logger *logrus.Logger, rejTxFile *os.File, acceptableErrs []string) {
 	defer wg.Done()
 
 	for file := range fileChan {
@@ -186,11 +207,11 @@ func worker(pool *mempool.Mempool, fileChan <-chan fs.DirEntry, doneChan chan<- 
 			panic(err)
 		}
 
-		if err := (*pool).PutTx(tx); err != nil {
-			logger.Info("processing ", file.Name())
+		if err := pool.PutTx(tx); err != nil {
+			logger.Info("Processing ", file.Name())
 			rejTxFile.WriteString(file.Name() + " Reason: " + err.Error() + "\n")
 
-			if Contains(err.Error(), acceptableErrs) {
+			if contains(err.Error(), acceptableErrs) {
 				doneChan <- struct{}{}
 				continue
 			}
@@ -200,7 +221,8 @@ func worker(pool *mempool.Mempool, fileChan <-chan fs.DirEntry, doneChan chan<- 
 	}
 }
 
-func Contains(target string, array []string) bool {
+// contains checks if a target string is present in a slice of strings.
+func contains(target string, array []string) bool {
 	for _, element := range array {
 		if element == target {
 			return true

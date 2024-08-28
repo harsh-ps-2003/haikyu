@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// miner represents the mining process and holds necessary data structures.
 type miner struct {
 	block   *block.Block
 	mempool mempool.Mempool
@@ -29,6 +30,7 @@ type miner struct {
 	maxBlockSize uint
 }
 
+// New creates and returns a new miner instance with the given mempool and options.
 func New(mempool mempool.Mempool, opts Opts) (*miner, error) {
 	file, err := os.OpenFile("../rejected_txs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -46,21 +48,9 @@ func New(mempool mempool.Mempool, opts Opts) (*miner, error) {
 	}, nil
 }
 
-// strategy
-// pick best tx from mempool [most fee] ✅:
-//   - this sorts out RBF and CPFP ✅
-//
-// do sanity checks on tx
-//   - fetch inputs ✅
-//   - check is inputs are already spent [if spent reason might RBF or double spending] reject tx [delete from mempool] ✅
-//   - fetch and outputs and do sanity checks on inputs and outputs
-//   - now do cryptographic checks [signatures and encodings]
-//   - verify scripts
-//   - if seems ok then push txId into block [we only need txID for this assignment we can flush inputs and outputs]
-//
-// build coinbase tx from fee collected + witness-commitment
-// build block Header
-// save block to output.txt
+// Mine performs the block building and mining process.
+// It selects transactions from the mempool, constructs the block,
+// creates a coinbase transaction, and mines the block to meet the target difficulty.
 func (m *miner) Mine() error {
 	weight := 0
 	feeCollected := 0
@@ -136,18 +126,6 @@ PICK_TX:
 		wTxids = append(wTxids, tx.WTXID)          // wTxid is in LittleEndian
 	}
 
-	// build CoinBase Tx
-	// - has one input ✅
-	// - - in hash  and witness  = bytes32(0x0) ✅
-	// - - in vout max ✅
-	// - - include block height in sig script ✅
-	// - has two outputs
-	// - - compute wtxids and witnessCommitement = sha(merkle(wtxids) + bytes32(0x0))
-	// - - out scriptputkey == op_return + PushBytes + witnessCommitement
-	// - - other output has fee collection
-	// serialize Coinbase with Witness
-	// append beginning of tx list
-
 	coinbaseVin := mempool.TxIn{
 		Txid:       "0000000000000000000000000000000000000000000000000000000000000000",
 		Vout:       0xffffffff,
@@ -168,14 +146,6 @@ PICK_TX:
 		},
 	}
 
-	// fmt.Print("wtxid root merkle hash ", GenerateMerkleRoot(wTxids), "\n"+"witness commitment ", Hash256(GenerateMerkleRoot(wTxids)+"0000000000000000000000000000000000000000000000000000000000000000"), "\n", GenerateMerkleRoot(wTxids)+"0000000000000000000000000000000000000000000000000000000000000000")
-	// fmt.Println("")
-
-	// //debug print first and last 5 wtxids
-	// fmt.Println("first 5 wtxids ", wTxids[:5])
-	// fmt.Println("last 5 wtxids ", wTxids[len(wTxids)-5:])
-	// fmt.Println("")
-
 	coinbaseTx := mempool.Transaction{
 		Version:  2,
 		Locktime: 0,
@@ -189,14 +159,6 @@ PICK_TX:
 	}
 
 	m.block.Txs = append([]string{cbTxId}, m.block.Txs...)
-
-	// build block header
-	// add block version 2
-	// prev block bytes32(0x0)
-	// add merklee root
-	// add time
-	// add nbits 0x1f00ffff
-	// mine with nonce 0
 
 	blockHeader := block.BlocKHeader{
 		Version:           4,
@@ -220,9 +182,6 @@ PICK_TX:
 				case <-doneChan:
 					return
 				default:
-					// generate blockHash sha(sha(header_serialized))
-					// mine it until less than difficulty (tune nonce)
-
 					blockHeader.Nonce = atomic.AddUint32(&nextNonce, 1)
 					blockHash := doubleHash(blockHeader.Serialize())
 					if bytes.Compare(reverseByteOrder(blockHash), GivenDifficulty) < 0 {
@@ -265,11 +224,10 @@ PICK_TX:
 	m.logger.Infof("Total Fee Collected %d \n", feeCollected)
 	m.logger.Infof("Total weight %d", weight)
 
-	// Hash must be Le
-
 	return nil
 }
 
+// doubleHash performs a double SHA256 hash on the input data.
 func doubleHash(header []byte) []byte {
 	h := sha256.New()
 	h.Write(header)
@@ -281,6 +239,7 @@ func doubleHash(header []byte) []byte {
 	return h.Sum(nil)
 }
 
+// reverseByteOrder reverses the order of bytes in a byte slice.
 func reverseByteOrder(input []byte) []byte {
 	for i, j := 0, len(input)-1; i < j; i, j = i+1, j-1 {
 		input[i], input[j] = input[j], input[i]
@@ -288,6 +247,7 @@ func reverseByteOrder(input []byte) []byte {
 	return input
 }
 
+// reverseStringByteOrder reverses the byte order of a hexadecimal string.
 func reverseStringByteOrder(hash string) string {
 	reverse, _ := hex.DecodeString(hash)
 	for i, j := 0, len(reverse)-1; i < j; i, j = i+1, j-1 {
