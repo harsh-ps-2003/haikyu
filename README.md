@@ -2,26 +2,25 @@
 
 Haikyu is a Bitcoin miner simulation that demonstrates the process of mining a block, including transaction validation and selection from a mempool.
 
-## Quick Setup Guide
-
 ### Prerequisites
 - Go 1.16 or later
 - SQLite3
 
-### Setup
+## Setup
 Run the following script:
 ```shell
 chmod +x run.sh
 ./run.sh 
-#check info.log for results
 ```
+*check `info.log` for results*
 
-# Workflow explanation
-This project has 3 phases of execution in total as described below
+## How it works?
+This project has 3 phases of execution in total as described below :
+
 ### Initialize and Load Txs into [mempool](./internal/mempool/mempool.go)  
 entrypoint `main.go` starts by initializing a progressBar which logs number of files processed to stdout, a logger[info level] which is passed down to `miner` and `mempool` services. `main.go` panics on any error occurred during intilizalitation processes. Initialization creates 3 SQL tables For `Transactions` `Inputs` and `OutPoints`
 
-Once mempool is Loaded, entrypoints spins up several `go routines` to load transactions concurrently and save it to db, mempool does several checks on transaction data followed by putting tx into db, these checks are described as below
+Once mempool is Loaded, entrypoints spins up several `go routines` to load transactions concurrently and save it to db, mempool does several checks on transaction data followed by putting tx into db, these checks are described as below :
 1. Computes `Txhash` of entire transaction. by `SHA256(SHA256(legacy_tx_serialization))` in Little Endian Format.  legacy_tx_serialization is just a tx serialized without `marker` `flag` and `witness`.
 2. Computes `Wtxid` of entire transaction. by `SHA256(SHA256(wtxid serialization))`.
 3. Computes `Weight` and `FeeCollected` of entire transaction. by 
@@ -81,7 +80,7 @@ Once mempool is Loaded, entrypoints spins up several `go routines` to load trans
 6. now that we have block header we can mine until we reach target difficulty.
 7. mining a block is generally find a nonce such that. `Hash256(block_header) < target difficulty`
 8. we spin up 10 go routines to mine each block concurrently. each routine atomically increments a global nonce variable and then checks if it is less than target difficulty. if it is less then we break and return the nonce.
-9. finally now that we reached target difficulty we store results in `output.txt` file as follows
+9. finally now that we reached target difficulty we store results in `output.txt` file as follows :
 ```
 +---------------------------------+
 | SERIALIZED BLOCK HEADER         |
@@ -92,7 +91,7 @@ Once mempool is Loaded, entrypoints spins up several `go routines` to load trans
 +---------------------------------+
 ```
 
-## why and how of Sqlite
+## Why using SQLite?
 here are list of benefits for choosing sqlite.
 - fast processing and retrieval time.
 - divided whole Tx into 3 tables

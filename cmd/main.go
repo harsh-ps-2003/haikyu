@@ -31,9 +31,9 @@ const (
 
 // ProgressBar represents a progress bar for displaying task completion.
 type ProgressBar struct {
-	Total   int
-	Current int
-	rate    string
+	Total   int    // Total number of tasks
+	Current int    // Current number of completed tasks
+	rate    string // Visual representation of progress
 }
 
 // Play updates and displays the progress bar.
@@ -60,7 +60,7 @@ func main() {
 	startMiner(pool, logger)
 }
 
-// setupProfiling initializes CPU profiling.
+// setupProfiling initializes CPU profiling for performance analysis.
 func setupProfiling() {
 	f, err := os.Create(cpuProfileFile)
 	if err != nil {
@@ -70,7 +70,7 @@ func setupProfiling() {
 	pprof.StartCPUProfile(f)
 }
 
-// setupLogger configures and returns a logrus logger.
+// setupLogger configures and returns a logrus logger for application-wide logging.
 func setupLogger() *logrus.Logger {
 	logger := logrus.New()
 	logger.SetLevel(logrus.PanicLevel)
@@ -81,7 +81,7 @@ func setupLogger() *logrus.Logger {
 	return logger
 }
 
-// initializeMempool sets up and returns a new mempool instance.
+// initializeMempool sets up and returns a new mempool instance with the specified configuration.
 func initializeMempool(logger *logrus.Logger) mempool.Mempool {
 	mempoolConfig := mempool.Opts{
 		MaxMemPoolSize: config.MaxMemPoolSize,
@@ -104,6 +104,7 @@ func initializeMempool(logger *logrus.Logger) mempool.Mempool {
 }
 
 // processTransactionFiles reads and processes transaction files concurrently.
+// It uses a worker pool to handle file processing and updates a progress bar.
 func processTransactionFiles(pool mempool.Mempool, logger *logrus.Logger) {
 	files, err := os.ReadDir(path.MempoolDataPath)
 	if err != nil {
@@ -174,7 +175,7 @@ func setupRejectedTxFile() *os.File {
 	return rejTxFile
 }
 
-// startMiner initializes and starts the mining process.
+// startMiner initializes and starts the mining process using the populated mempool.
 func startMiner(pool mempool.Mempool, logger *logrus.Logger) {
 	logger.Info("Starting miner")
 
@@ -192,7 +193,8 @@ func startMiner(pool mempool.Mempool, logger *logrus.Logger) {
 	}
 }
 
-// worker processes transaction files concurrently.
+// worker is a goroutine that processes transaction files concurrently.
+// It reads JSON files, unmarshals transactions, and adds them to the mempool.
 func worker(pool mempool.Mempool, fileChan <-chan fs.DirEntry, doneChan chan<- struct{}, wg *sync.WaitGroup, logger *logrus.Logger, rejTxFile *os.File, acceptableErrs []string) {
 	defer wg.Done()
 

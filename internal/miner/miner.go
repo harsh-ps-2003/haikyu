@@ -21,13 +21,13 @@ import (
 
 // miner represents the mining process and holds necessary data structures.
 type miner struct {
-	block   *block.Block
-	mempool mempool.Mempool
+	block   *block.Block    // The block being mined
+	mempool mempool.Mempool // Reference to the mempool for transaction selection
 
-	logger         *logrus.Logger
-	rejectedTxFile *os.File
+	logger         *logrus.Logger // Logger for miner-specific logging
+	rejectedTxFile *os.File       // File to store information about rejected transactions
 
-	maxBlockSize uint
+	maxBlockSize uint // Maximum allowed block size in weight units
 }
 
 // New creates and returns a new miner instance with the given mempool and options.

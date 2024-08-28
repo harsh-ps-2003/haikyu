@@ -6,6 +6,7 @@ import (
 )
 
 // GenerateMerkleRoot calculates the Merkle root from a list of transaction IDs.
+// It implements the Merkle tree algorithm used in Bitcoin to create a single hash representing all transactions in a block.
 func GenerateMerkleRoot(txids []string) string {
 	if len(txids) == 0 {
 		return ""
@@ -33,6 +34,7 @@ func GenerateMerkleRoot(txids []string) string {
 }
 
 // reverse reverses the order of bytes in a byte slice.
+// This is useful for converting between big-endian and little-endian representations.
 func reverse(b []byte) []byte {
 	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
 		b[i], b[j] = b[j], b[i]
@@ -41,6 +43,7 @@ func reverse(b []byte) []byte {
 }
 
 // HexMustDecode decodes a hexadecimal string to bytes, panicking on error.
+// This function is used when the input is expected to be valid hexadecimal, and any decoding error is considered a critical failure.
 func HexMustDecode(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -50,6 +53,7 @@ func HexMustDecode(s string) []byte {
 }
 
 // Hash256 performs a double SHA256 hash on the input string and returns the result as a hexadecimal string.
+// This is the standard hashing method used in various parts of the Bitcoin protocol.
 func Hash256(input string) string {
 	// First hash
 	hasher := sha256.New()
