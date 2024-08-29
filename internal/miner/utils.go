@@ -3,34 +3,35 @@ package miner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+)
+
+const (
+	sha256Size = 32 // Size of SHA256 hash in bytes
 )
 
 // GenerateMerkleRoot calculates the Merkle root from a list of transaction IDs.
 // It implements the Merkle tree algorithm used in Bitcoin to create a single hash representing all transactions in a block.
-func GenerateMerkleRoot(txids []string) string {
+func GenerateMerkleRoot(txids []string) (string, error) {
 	if len(txids) == 0 {
-		return ""
+		return "", errors.New("empty transaction list")
 	}
 
 	for len(txids) > 1 {
-		var nextTxids []string
-
+		nextTxids := make([]string, (len(txids)+1)/2)
 		for i := 0; i < len(txids); i += 2 {
 			var pairHash string
-
 			if i+1 == len(txids) {
 				pairHash = Hash256(txids[i] + txids[i])
 			} else {
 				pairHash = Hash256(txids[i] + txids[i+1])
 			}
-
-			nextTxids = append(nextTxids, pairHash)
+			nextTxids[i/2] = pairHash
 		}
-
 		txids = nextTxids
 	}
 
-	return txids[0]
+	return txids[0], nil
 }
 
 // reverse reverses the order of bytes in a byte slice.
@@ -42,29 +43,27 @@ func reverse(b []byte) []byte {
 	return b
 }
 
-// HexMustDecode decodes a hexadecimal string to bytes, panicking on error.
-// This function is used when the input is expected to be valid hexadecimal, and any decoding error is considered a critical failure.
-func HexMustDecode(s string) []byte {
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		panic(err)
-	}
-	return b
+// HexDecode decodes a hexadecimal string to bytes.
+// It returns an error if the input is not valid hexadecimal.
+func HexDecode(s string) ([]byte, error) {
+	return hex.DecodeString(s)
 }
 
 // Hash256 performs a double SHA256 hash on the input string and returns the result as a hexadecimal string.
 // This is the standard hashing method used in various parts of the Bitcoin protocol.
 func Hash256(input string) string {
-	// First hash
+	decoded, err := HexDecode(input)
+	if err != nil {
+		return "" // Return empty string on invalid input
+	}
+
 	hasher := sha256.New()
-	hasher.Write(HexMustDecode(input))
+	hasher.Write(decoded)
 	firstHash := hasher.Sum(nil)
 
-	// Second hash
 	hasher.Reset()
 	hasher.Write(firstHash)
 	secondHash := hasher.Sum(nil)
 
-	// Convert the final hash to a hexadecimal string
 	return hex.EncodeToString(secondHash)
 }

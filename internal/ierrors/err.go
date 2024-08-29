@@ -27,4 +27,5 @@ var (
 	ErrInvalidSignature     = errors.New("invalid signature")
 	ErrRedeemScriptMismatch = errors.New("redeem script mismatch")
 	ErrInvalidWitnessLength = errors.New("invalid witness length")
+	ErrInvalidScriptSig     = errors.New("invalid script signature") // Add this line
 )

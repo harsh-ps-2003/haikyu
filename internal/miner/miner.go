@@ -2,6 +2,7 @@ package miner
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,7 +12,10 @@ import (
 	"haikyu/internal/mempool"
 	"haikyu/internal/path"
 	"haikyu/pkg/block"
+	"haikyu/pkg/transaction"
+	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,126 +23,182 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	logFilePath        = "../miner.log"
+	logFilePermissions = 0666
+	initialWTXID       = "0000000000000000000000000000000000000000000000000000000000000000"
+	givenDifficultyHex = "0000ffff00000000000000000000000000000000000000000000000000000000"
+	coinbaseTxid       = "0000000000000000000000000000000000000000000000000000000000000000"
+	coinbaseVout       = 0xffffffff
+	coinbaseScriptSig  = "0368c10c"
+	coinbaseSequence   = 0xffffffff
+	coinbaseWitness    = "0000000000000000000000000000000000000000000000000000000000000000"
+	miningRoutines     = 10
+	blockVersion       = 4
+	nBits              = 0x1f00ffff
+	previousBlockHash  = "0000000000000000000000000000000000000000000000000000000000000000"
+)
+
 // miner represents the mining process and holds necessary data structures.
 type miner struct {
 	block   *block.Block    // The block being mined
 	mempool mempool.Mempool // Reference to the mempool for transaction selection
-
-	logger         *logrus.Logger // Logger for miner-specific logging
-	rejectedTxFile *os.File       // File to store information about rejected transactions
+	logger  *logrus.Logger  // Logger for miner-specific logging
 
 	maxBlockSize uint // Maximum allowed block size in weight units
 }
 
 // New creates and returns a new miner instance with the given mempool and options.
 func New(mempool mempool.Mempool, opts Opts) (*miner, error) {
-	file, err := os.OpenFile("../rejected_txs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logger := logrus.New()
+	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, logFilePermissions)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
+	logger.SetOutput(io.MultiWriter(os.Stdout, file))
 
 	return &miner{
-		block: &block.Block{},
-
-		logger:       opts.Logger,
+		block:        &block.Block{},
+		logger:       logger,
 		maxBlockSize: opts.MaxBlockSize,
 		mempool:      mempool,
-
-		rejectedTxFile: file,
 	}, nil
 }
 
 // Mine performs the block building and mining process.
-// It selects transactions from the mempool, constructs the block,
-// creates a coinbase transaction, and mines the block to meet the target difficulty.
 func (m *miner) Mine() error {
 	weight := 0
 	feeCollected := 0
-	wTxids := []string{
-		"0000000000000000000000000000000000000000000000000000000000000000",
+	wTxids := []string{initialWTXID}
+
+	givenDifficulty, err := HexDecode(givenDifficultyHex)
+	if err != nil {
+		return fmt.Errorf("failed to decode given difficulty: %w", err)
 	}
 
-	GivenDifficulty := HexMustDecode("0000ffff00000000000000000000000000000000000000000000000000000000")
+	if err := m.buildBlock(&weight, &feeCollected, &wTxids); err != nil {
+		return fmt.Errorf("failed to build block: %w", err)
+	}
 
-	//TODO: use logrus file than file writing
+	if err := m.createCoinbaseTransaction(feeCollected, wTxids); err != nil {
+		return fmt.Errorf("failed to create coinbase transaction: %w", err)
+	}
+
+	if err := m.mineBlock(givenDifficulty); err != nil {
+		return fmt.Errorf("failed to mine block: %w", err)
+	}
+
+	if err := m.writeOutputFile(); err != nil {
+		return fmt.Errorf("failed to write output file: %w", err)
+	}
+
+	m.logMiningResults(feeCollected, weight)
+
+	return nil
+}
+
+func (m *miner) buildBlock(weight, feeCollected *int, wTxids *[]string) error {
 PICK_TX:
-	for weight < config.MAX_BLOCK_SIZE {
-		tx, err := m.mempool.PickBestTx()
+	for *weight < config.MAX_BLOCK_SIZE {
+		tx, err := m.pickTransaction(*weight)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				m.logger.Info("mempool is empty")
+				m.logger.Info("No more suitable transactions found")
 				break PICK_TX
 			}
 			return err
 		}
 
-		if weight+int(tx.Weight) > config.MAX_BLOCK_SIZE {
-			tx, err = m.mempool.PickBestTxWithinWeight(uint64(config.MAX_BLOCK_SIZE - weight))
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					m.logger.Info("mempool is empty")
-					break PICK_TX
-				}
-				return err
-			}
-		}
-
-		fmt.Printf("\rProcessing... tx: %s collected: %d with weight: %d", tx.Hash, feeCollected, weight)
+		m.logTransactionProcessing(tx, *feeCollected, *weight)
 
 		inputs, err := m.mempool.GetInputs(tx.Hash)
 		if err != nil {
-			m.logger.Info("unable to get inputs", err)
-			return err
-		}
-
-		if err := m.mempool.ValidateWholeTx(tx, inputs); err != nil {
-			m.logger.Infof("tx is invalid %s", err)
-			m.rejectedTxFile.WriteString(tx.Hash + " Reason: Invalid tx" + "\n")
+			m.logger.WithError(err).Error("Unable to get inputs")
 			continue PICK_TX
 		}
 
-		// signature checks and stack execution
-		for _, input := range inputs {
-			if err := m.mempool.MarkOutPointSpent(input.FundingTxHash, input.FundingIndex); err != nil {
-				if errors.Is(err, ierrors.ErrAlreadySpent) {
-					m.logger.Info("already spent")
-					m.rejectedTxFile.WriteString(tx.Hash + " Reason: Already spent" + "\n")
-					continue PICK_TX
-				}
-			}
+		if err := m.validateAndProcessTransaction(tx, inputs); err != nil {
+			continue PICK_TX
 		}
 
-		if err := m.mempool.DeleteTx(tx.ID); err != nil {
-			m.logger.Info("unable to delete tx", err)
-			return err
-		}
+		*weight, *feeCollected = m.updateBlockStats(tx, *weight, *feeCollected)
+		m.updateBlockTransactions(tx, wTxids)
+	}
+	return nil
+}
 
-		// include tx in block
-		weight += int(tx.Weight)
-		// if weight > config.MAX_BLOCK_SIZE {
-		// 	m.logger.Info("tx weight is too big")
-		// 	weight -= int(tx.Weight)
-		// 	break PICK_TX
-		// }
-		feeCollected += int(tx.FeeCollected)
-
-		m.block.Txs = append(m.block.Txs, tx.Hash) // hash is in LittleEndian
-		wTxids = append(wTxids, tx.WTXID)          // wTxid is in LittleEndian
+func (m *miner) pickTransaction(currentWeight int) (transaction.Tx, error) {
+	tx, err := m.mempool.PickBestTx()
+	if err != nil {
+		return transaction.Tx{}, err
 	}
 
+	if currentWeight+int(tx.Weight) > config.MAX_BLOCK_SIZE {
+		return m.mempool.PickBestTxWithinWeight(uint64(config.MAX_BLOCK_SIZE - currentWeight))
+	}
+
+	return tx, nil
+}
+
+func (m *miner) validateAndProcessTransaction(tx transaction.Tx, inputs []transaction.InputTx) error {
+	if err := m.mempool.ValidateWholeTx(tx, inputs); err != nil {
+		m.logger.WithFields(logrus.Fields{
+			"txHash": tx.Hash,
+			"reason": "Invalid tx",
+		}).Info("Rejected transaction")
+		return err
+	}
+
+	for _, input := range inputs {
+		if err := m.mempool.MarkOutPointSpent(input.FundingTxHash, input.FundingIndex); err != nil {
+			if errors.Is(err, ierrors.ErrAlreadySpent) {
+				m.logger.WithFields(logrus.Fields{
+					"txHash": tx.Hash,
+					"reason": "Already spent",
+				}).Info("Rejected transaction")
+				return err
+			}
+		}
+	}
+
+	if err := m.mempool.DeleteTx(tx.ID); err != nil {
+		m.logger.WithError(err).Error("Unable to delete tx")
+		return err
+	}
+
+	return nil
+}
+
+func (m *miner) updateBlockStats(tx transaction.Tx, weight, feeCollected int) (int, int) {
+	weight += int(tx.Weight)
+	feeCollected += int(tx.FeeCollected)
+	return weight, feeCollected
+}
+
+func (m *miner) updateBlockTransactions(tx transaction.Tx, wTxids *[]string) {
+	m.block.Txs = append(m.block.Txs, tx.Hash) // hash is in LittleEndian
+	*wTxids = append(*wTxids, tx.WTXID)        // wTxid is in LittleEndian
+}
+
+func (m *miner) createCoinbaseTransaction(feeCollected int, wTxids []string) error {
 	coinbaseVin := mempool.TxIn{
-		Txid:       "0000000000000000000000000000000000000000000000000000000000000000",
-		Vout:       0xffffffff,
-		ScriptSig:  "0368c10c",
-		Sequence:   0xffffffff,
-		Witness:    []string{"0000000000000000000000000000000000000000000000000000000000000000"},
+		Txid:       coinbaseTxid,
+		Vout:       coinbaseVout,
+		ScriptSig:  coinbaseScriptSig,
+		Sequence:   coinbaseSequence,
+		Witness:    []string{coinbaseWitness},
 		IsCoinbase: true,
+	}
+
+	merkleRoot, err := GenerateMerkleRoot(wTxids)
+	if err != nil {
+		return fmt.Errorf("failed to generate merkle root: %w", err)
 	}
 
 	coinbaseVouts := []mempool.TxOut{
 		{
 			Value:        0,
-			ScriptPubKey: "6a24aa21a9ed" + Hash256(GenerateMerkleRoot(wTxids)+"0000000000000000000000000000000000000000000000000000000000000000"),
+			ScriptPubKey: "6a24aa21a9ed" + Hash256(merkleRoot+initialWTXID),
 		},
 		{
 			Value:        uint64(feeCollected),
@@ -155,74 +215,125 @@ PICK_TX:
 
 	cbTxId, _, _, err := coinbaseTx.Hash()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to hash coinbase transaction: %w", err)
 	}
 
 	m.block.Txs = append([]string{cbTxId}, m.block.Txs...)
+	return nil
+}
 
-	blockHeader := block.BlocKHeader{
-		Version:           4,
-		TimeStamp:         uint32(time.Now().Unix()),
-		NBits:             0x1f00ffff,
-		PreviousBlockHash: "0000000000000000000000000000000000000000000000000000000000000000",
-		Nonce:             0,
-		MerkleRoot:        reverseStringByteOrder(GenerateMerkleRoot(m.block.Txs)),
+func (m *miner) mineBlock(givenDifficulty []byte) error {
+	blockHeader, err := m.createBlockHeader()
+	if err != nil {
+		return fmt.Errorf("failed to create block header: %w", err)
 	}
 
-	respChan := make(chan uint32)
-	doneChan := make(chan struct{})
-
-	// spin 10 go routines which listen for nonces
-	// after receiving nonces they build block header and send as response
-	nextNonce := uint32(0)
-	for i := 0; i < 10; i++ {
-		go func(blockHeader block.BlocKHeader) {
-			for {
-				select {
-				case <-doneChan:
-					return
-				default:
-					blockHeader.Nonce = atomic.AddUint32(&nextNonce, 1)
-					blockHash := doubleHash(blockHeader.Serialize())
-					if bytes.Compare(reverseByteOrder(blockHash), GivenDifficulty) < 0 {
-						m.logger.Infof("\nNonce :- %d hash is %s", blockHeader.Nonce, hex.EncodeToString(blockHash))
-						respChan <- blockHeader.Nonce
-						return
-					}
-				}
-			}
-		}(blockHeader)
+	nonce, err := m.findNonce(blockHeader, givenDifficulty)
+	if err != nil {
+		return fmt.Errorf("failed to find nonce: %w", err)
 	}
 
-	// wait for nonces
-	nonce := <-respChan
-	close(doneChan)
 	blockHeader.Nonce = nonce
-	m.logger.Infof("Nonce: %d hash is %s", blockHeader.Nonce, hex.EncodeToString(doubleHash(blockHeader.Serialize())))
+	m.block.Header = blockHeader
 
+	blockHash := doubleHash(blockHeader.Serialize())
+	m.logger.WithFields(logrus.Fields{
+		"nonce": nonce,
+		"hash":  hex.EncodeToString(blockHash),
+	}).Info("Block mined")
+
+	return nil
+}
+
+func (m *miner) createBlockHeader() (block.BlocKHeader, error) {
+	merkleRoot, err := GenerateMerkleRoot(m.block.Txs)
+	if err != nil {
+		return block.BlocKHeader{}, fmt.Errorf("failed to generate merkle root: %w", err)
+	}
+
+	return block.BlocKHeader{
+		Version:           blockVersion,
+		TimeStamp:         uint32(time.Now().Unix()),
+		NBits:             nBits,
+		PreviousBlockHash: previousBlockHash,
+		Nonce:             0,
+		MerkleRoot:        reverseStringByteOrder(merkleRoot),
+	}, nil
+}
+
+func (m *miner) findNonce(blockHeader block.BlocKHeader, givenDifficulty []byte) (uint32, error) {
+	respChan := make(chan uint32, miningRoutines)
+	errChan := make(chan error, miningRoutines)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	nextNonce := uint32(0)
+
+	for i := 0; i < miningRoutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.mineRoutine(ctx, blockHeader, givenDifficulty, &nextNonce, respChan, errChan)
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(respChan)
+		close(errChan)
+	}()
+
+	select {
+	case nonce := <-respChan:
+		return nonce, nil
+	case err := <-errChan:
+		return 0, err
+	}
+}
+
+func (m *miner) mineRoutine(ctx context.Context, blockHeader block.BlocKHeader, givenDifficulty []byte, nextNonce *uint32, respChan chan<- uint32, errChan chan<- error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			blockHeader.Nonce = atomic.AddUint32(nextNonce, 1)
+			blockHash := doubleHash(blockHeader.Serialize())
+			if bytes.Compare(reverseByteOrder(blockHash), givenDifficulty) < 0 {
+				respChan <- blockHeader.Nonce
+				return
+			}
+		}
+	}
+}
+
+func (m *miner) writeOutputFile() error {
 	os.Remove(path.OutFilePath)
 
-	// open output.txt file and write blockHeader serialized , coinbase serialized , txids
 	file, err := os.OpenFile(path.OutFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	_, cb_w_ser, _, err := coinbaseTx.Serialize()
+	file.WriteString(hex.EncodeToString(m.block.Header.Serialize()) + "\n")
+
+	// Replace the GetTxByHash call with a method to reconstruct the coinbase transaction
+	coinbaseTx, err := m.reconstructCoinbaseTransaction()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to reconstruct coinbase transaction: %w", err)
 	}
 
-	file.WriteString(hex.EncodeToString(blockHeader.Serialize()) + "\n")
+	_, cb_w_ser, _, err := coinbaseTx.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize coinbase transaction: %w", err)
+	}
+
 	file.WriteString(hex.EncodeToString(cb_w_ser) + "\n")
 	for _, txId := range m.block.Txs {
 		file.WriteString(reverseStringByteOrder(txId) + "\n")
 	}
-
-	m.logger.Infof("\n mined block %d ", blockHeader.Nonce)
-	m.logger.Infof("Total Fee Collected %d \n", feeCollected)
-	m.logger.Infof("Total weight %d", weight)
 
 	return nil
 }
@@ -254,4 +365,73 @@ func reverseStringByteOrder(hash string) string {
 		reverse[i], reverse[j] = reverse[j], reverse[i]
 	}
 	return hex.EncodeToString(reverse)
+}
+
+func (m *miner) logTransactionProcessing(tx transaction.Tx, feeCollected, weight int) {
+	m.logger.WithFields(logrus.Fields{
+		"tx":           tx.Hash,
+		"feeCollected": feeCollected,
+		"weight":       weight,
+	}).Info("Processing transaction")
+}
+
+func (m *miner) logMiningResults(feeCollected, weight int) {
+	m.logger.WithFields(logrus.Fields{
+		"nonce":        m.block.Header.Nonce,
+		"feeCollected": feeCollected,
+		"weight":       weight,
+	}).Info("Mined block")
+}
+
+func (m *miner) reconstructCoinbaseTransaction() (mempool.Transaction, error) {
+	if len(m.block.Txs) == 0 {
+		return mempool.Transaction{}, errors.New("no transactions in block")
+	}
+
+	feeCollected := m.calculateFeeCollected()
+
+	merkleRoot, err := GenerateMerkleRoot(m.block.Txs)
+	if err != nil {
+		return mempool.Transaction{}, fmt.Errorf("failed to generate merkle root: %w", err)
+	}
+
+	return mempool.Transaction{
+		Version:  2,
+		Locktime: 0,
+		Vin: []mempool.TxIn{{
+			Txid:       coinbaseTxid,
+			Vout:       coinbaseVout,
+			ScriptSig:  coinbaseScriptSig,
+			Sequence:   coinbaseSequence,
+			Witness:    []string{coinbaseWitness},
+			IsCoinbase: true,
+		}},
+		Vout: []mempool.TxOut{
+			{
+				Value:        0,
+				ScriptPubKey: "6a24aa21a9ed" + Hash256(merkleRoot+initialWTXID),
+			},
+			{
+				Value:        uint64(feeCollected),
+				ScriptPubKey: "76a914536ffa992491508dca0354e52f32a3a7a679a53a88ac",
+			},
+		},
+	}, nil
+}
+
+func (m *miner) calculateFeeCollected() int {
+	feeCollected := 0
+	for _, tx := range m.block.Txs[1:] { // Skip coinbase transaction
+		// Assuming you have a way to get the fee for each transaction
+		// This is a placeholder and should be replaced with actual fee calculation
+		feeCollected += getFeeForTransaction(tx)
+	}
+	return feeCollected
+}
+
+// getFeeForTransaction is a placeholder function and should be implemented
+// to return the actual fee for a given transaction
+func getFeeForTransaction(txID string) int {
+	// Implementation needed
+	return 0
 }

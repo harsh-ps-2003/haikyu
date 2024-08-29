@@ -8,7 +8,9 @@ import (
 	"haikyu/pkg/encoding"
 	"haikyu/pkg/opcode"
 	"haikyu/pkg/transaction"
+	"hash"
 	"strings"
+	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -16,83 +18,106 @@ import (
 	"golang.org/x/crypto/ripemd160"
 )
 
+// ValidateTxScripts validates the scripts for all inputs in the transaction.
 func (t *Transaction) ValidateTxScripts() error {
-	// iter through inputs and validate each one of em based on their type
 	for i, input := range t.Vin {
-		var err error = nil
-		switch transaction.Type(input.Prevout.ScriptPubKeyType) {
-		case transaction.OP_RETURN_TYPE:
-			err = ierrors.ErrUsingOpReturnAsInput
-		case transaction.P2PK:
-			err = nil // ignore for now no p2pk txs in assignment
-		case transaction.P2PKH:
-
-			tempTx := *t
-
-			stackElem := strings.Split(input.ScriptSigAsm, " ")
-
-			// compressed pubkey
-			pubKey := stackElem[len(stackElem)-1]
-			Signature := stackElem[1]
-
-			signatureBytes := MustHexDecode(Signature)
-			lastSigByte := signatureBytes[len(signatureBytes)-1]
-
-			MessageHash := generateMessageHashLegacy(tempTx, i, input, lastSigByte)
-
-			err = ECVerify(MessageHash, signatureBytes, MustHexDecode(pubKey))
-
-		case transaction.P2SH:
-			redeemScript := MustDecodeAsmScript(strings.Split(input.InnerRedeemScriptAsm, " "))
-			redeemScripExpectedtHash := strings.Split(input.Prevout.ScriptPubKeyAsm, " ")[2]
-
-			if hex.EncodeToString(H160(redeemScript)) != redeemScripExpectedtHash {
-				err = ierrors.ErrRedeemScriptMismatch
-			}
-
-		case transaction.P2MS:
-			err = nil
-
-		case transaction.P2WSH:
-			redeemScript := MustDecodeAsmScript(strings.Split(input.InnerWitnessScriptAsm, " "))
-			redeemScripExpectedtHash := strings.Split(input.Prevout.ScriptPubKeyAsm, " ")[2]
-
-			if hex.EncodeToString(Sha256(redeemScript)) != redeemScripExpectedtHash {
-				err = ierrors.ErrRedeemScriptMismatch
-			}
-
-		case transaction.P2WPKH:
-			tempTx := *t
-
-			if (len(input.Witness)) != 2 {
-				err = ierrors.ErrInvalidWitnessLength
-				break
-			}
-
-			Signature := MustHexDecode(input.Witness[0])
-			pubKeyHash := MustHexDecode(input.Witness[1])
-
-			lastSigByte := Signature[len(Signature)-1]
-
-			MessageHash := generateMessageHashSegwit(tempTx, i, input, lastSigByte)
-
-			err = ECVerify(MessageHash, Signature, pubKeyHash)
-
-		case transaction.P2TR:
-			err = nil
-		default:
-			err = ierrors.ErrScriptValidation
-		}
+		err := validateInput(t, i, input)
 		if err != nil {
-			fmt.Printf("\n encountered an error: %s for inputTxid: %s and vout number: %d", err, input.Txid, input.Vout)
-			return err
+			return fmt.Errorf("input %d validation failed: %w", i, err)
 		}
 	}
 	return nil
 }
 
-// verifies ecdsa signature from der encoding
-// digest MessageHash Signed
+// validateInput validates a single input based on its script type.
+func validateInput(t *Transaction, i int, input TxIn) error {
+	switch transaction.Type(input.Prevout.ScriptPubKeyType) {
+	case transaction.OP_RETURN_TYPE:
+		return ierrors.ErrUsingOpReturnAsInput
+	case transaction.P2PK:
+		return nil // ignore for now no p2pk txs in assignment
+	case transaction.P2PKH:
+		return validateP2PKH(t, i, input)
+	case transaction.P2SH:
+		return validateP2SH(input)
+	case transaction.P2MS:
+		return nil
+	case transaction.P2WSH:
+		return validateP2WSH(input)
+	case transaction.P2WPKH:
+		return validateP2WPKH(t, i, input)
+	case transaction.P2TR:
+		return nil
+	default:
+		return ierrors.ErrScriptValidation
+	}
+}
+
+func validateP2PKH(t *Transaction, i int, input TxIn) error {
+	stackElem := strings.Split(input.ScriptSigAsm, " ")
+	if len(stackElem) < 2 {
+		return ierrors.ErrInvalidScriptSig
+	}
+
+	pubKey := stackElem[len(stackElem)-1]
+	signature := stackElem[1]
+
+	signatureBytes, err := hex.DecodeString(signature)
+	if err != nil {
+		return fmt.Errorf("invalid signature hex: %w", err)
+	}
+
+	lastSigByte := signatureBytes[len(signatureBytes)-1]
+	messageHash := generateMessageHashLegacy(*t, i, input, lastSigByte)
+
+	return ECVerify(messageHash, signatureBytes, MustHexDecode(pubKey))
+}
+
+func validateP2SH(input TxIn) error {
+	redeemScript := MustDecodeAsmScript(strings.Split(input.InnerRedeemScriptAsm, " "))
+	redeemScripExpectedtHash := strings.Split(input.Prevout.ScriptPubKeyAsm, " ")[2]
+
+	if hex.EncodeToString(H160(redeemScript)) != redeemScripExpectedtHash {
+		return ierrors.ErrRedeemScriptMismatch
+	}
+
+	return nil
+}
+
+func validateP2WSH(input TxIn) error {
+	redeemScript := MustDecodeAsmScript(strings.Split(input.InnerWitnessScriptAsm, " "))
+	redeemScripExpectedtHash := strings.Split(input.Prevout.ScriptPubKeyAsm, " ")[2]
+
+	if hex.EncodeToString(Sha256(redeemScript)) != redeemScripExpectedtHash {
+		return ierrors.ErrRedeemScriptMismatch
+	}
+
+	return nil
+}
+
+func validateP2WPKH(t *Transaction, i int, input TxIn) error {
+	if (len(input.Witness)) != 2 {
+		return ierrors.ErrInvalidWitnessLength
+	}
+
+	signature, err := hex.DecodeString(input.Witness[0])
+	if err != nil {
+		return fmt.Errorf("invalid signature hex: %w", err)
+	}
+
+	pubKeyHash, err := hex.DecodeString(input.Witness[1])
+	if err != nil {
+		return fmt.Errorf("invalid pubkey hash hex: %w", err)
+	}
+
+	lastSigByte := signature[len(signature)-1]
+	messageHash := generateMessageHashSegwit(*t, i, input, lastSigByte)
+
+	return ECVerify(messageHash, signature, pubKeyHash)
+}
+
+// ECVerify verifies an ECDSA signature.
+// digest: MessageHash Signed
 // sig: signature with r and s in DER encoding
 // pubkey: compressed 33 byte pubkey
 func ECVerify(digest []byte, sig []byte, pubkey []byte) error {
@@ -107,7 +132,6 @@ func ECVerify(digest []byte, sig []byte, pubkey []byte) error {
 	}
 
 	if !signature.Verify(digest, publicKey) {
-		// fmt.Printf("signature: %s\n and pubkey: %s", hex.EncodeToString(signature.Serialize()), hex.EncodeToString(publicKey.SerializeUncompressed()))
 		return ierrors.ErrInvalidSignature
 	}
 	return nil
@@ -140,19 +164,30 @@ func MustDecodeAsmScript(asmScript []string) []byte {
 	return decoded_script
 }
 
+var sha256Pool = sync.Pool{
+	New: func() interface{} {
+		return sha256.New()
+	},
+}
+
+// H160 performs a SHA256 followed by a RIPEMD160 hash on the input.
 func H160(b []byte) []byte {
-	h := sha256.New()
+	h := sha256Pool.Get().(hash.Hash)
+	defer sha256Pool.Put(h)
+	h.Reset()
 	h.Write(b)
 	firstHash := h.Sum(nil)
 
-	h = ripemd160.New()
-	h.Write(firstHash)
-
-	return h.Sum(nil)
+	h160 := ripemd160.New()
+	h160.Write(firstHash)
+	return h160.Sum(nil)
 }
 
+// Sha256 performs a SHA256 hash on the input.
 func Sha256(b []byte) []byte {
-	h := sha256.New()
+	h := sha256Pool.Get().(hash.Hash)
+	defer sha256Pool.Put(h)
+	h.Reset()
 	h.Write(b)
 	return h.Sum(nil)
 }
@@ -188,8 +223,6 @@ func generateMessageHashSegwit(tempTx Transaction, pos int, input TxIn, sigHash 
 	case 0x01:
 		serializedTx = SegwitSerializeAll(tempTx, input, []byte{0x01, 0x00, 0x00, 0x00})
 	case 0x81:
-		// tempTx.Vin = []TxIn{input}
-		// tempTx.Vin[0].ScriptSig = input.Prevout.ScriptPubKey
 		serializedTx = SegwitSerializeAllAnyOne(tempTx, input, []byte{0x81, 0x00, 0x00, 0x00})
 	case 0x83:
 		serializedTx = SegwitSerializeSingleAnyOne(tempTx, pos, input, []byte{0x83, 0x00, 0x00, 0x00})
@@ -202,56 +235,64 @@ func generateMessageHashSegwit(tempTx Transaction, pos int, input TxIn, sigHash 
 	return chainhash.DoubleHashB(serializedTx)
 }
 
-// returns pre image
-// preimage = version ✅ + hash256(inputs) ✅ + hash256(sequences) ✅ + input ✅ + scriptcode ✅ + amount ✅ + sequence ✅ + hash256(outputs) + locktime ✅ + SIGHASH ✅
+// SegwitSerializeAll generates the preimage for SegWit transactions with SIGHASH_ALL.
 func SegwitSerializeAll(tempTx Transaction, inp TxIn, sigHash []byte) []byte {
 	preImage := encoding.NewLEBuffer()
-
 	preImage.Set(tempTx.Version)
 
-	InputsBytes := encoding.NewLEBuffer()
-	SequencesBytes := encoding.NewLEBuffer()
-
-	for _, input := range tempTx.Vin {
-		InputsBytes.SetBytes(MustHexDecode(input.Txid), true)
-		InputsBytes.Set(input.Vout)
-
-		SequencesBytes.Set(input.Sequence)
-	}
-
-	preImage.SetBytes(chainhash.DoubleHashB(InputsBytes.GetBuffer()), false)
-	preImage.SetBytes(chainhash.DoubleHashB(SequencesBytes.GetBuffer()), false)
+	preImage.SetBytes(hashPrevouts(tempTx.Vin), false)
+	preImage.SetBytes(hashSequences(tempTx.Vin), false)
 
 	preImage.SetBytes(MustHexDecode(inp.Txid), true)
 	preImage.Set(inp.Vout)
 
-	pubKeyHash := MustHexDecode(inp.Prevout.ScriptPubKey[4:])
-
-	scriptCode := make([]byte, 0)
-	scriptCode = append(scriptCode, []byte{
-		0x19, 0x76, 0xa9, 0x14,
-	}...)
-	scriptCode = append(scriptCode, pubKeyHash...)
-	scriptCode = append(scriptCode, 0x88, 0xac)
-
+	scriptCode := generateP2WPKHScriptCode(inp)
 	preImage.SetBytes(scriptCode, false)
 	preImage.Set(inp.Prevout.Value)
 	preImage.Set(inp.Sequence)
 
-	outputBytes := encoding.NewLEBuffer()
-
-	for _, output := range tempTx.Vout {
-		outputBytes.Set(output.Value)
-		scriptPubKey := MustHexDecode(output.ScriptPubKey)
-		outputBytes.Set(encoding.CompactSize(uint64(len(scriptPubKey))))
-		outputBytes.SetBytes(scriptPubKey, false)
-	}
-
-	preImage.SetBytes(chainhash.DoubleHashB(outputBytes.GetBuffer()), false)
+	preImage.SetBytes(hashOutputs(tempTx.Vout), false)
 	preImage.Set(tempTx.Locktime)
+	preImage.SetBytes(sigHash, false)
 
-	preImage.SetBytes(sigHash, false) // sighash
 	return preImage.GetBuffer()
+}
+
+func hashPrevouts(inputs []TxIn) []byte {
+	buffer := encoding.NewLEBuffer()
+	for _, input := range inputs {
+		buffer.SetBytes(MustHexDecode(input.Txid), true)
+		buffer.Set(input.Vout)
+	}
+	return chainhash.DoubleHashB(buffer.GetBuffer())
+}
+
+func hashSequences(inputs []TxIn) []byte {
+	buffer := encoding.NewLEBuffer()
+	for _, input := range inputs {
+		buffer.Set(input.Sequence)
+	}
+	return chainhash.DoubleHashB(buffer.GetBuffer())
+}
+
+func hashOutputs(outputs []TxOut) []byte {
+	buffer := encoding.NewLEBuffer()
+	for _, output := range outputs {
+		buffer.Set(output.Value)
+		scriptPubKey := MustHexDecode(output.ScriptPubKey)
+		buffer.Set(encoding.CompactSize(uint64(len(scriptPubKey))))
+		buffer.SetBytes(scriptPubKey, false)
+	}
+	return chainhash.DoubleHashB(buffer.GetBuffer())
+}
+
+func generateP2WPKHScriptCode(inp TxIn) []byte {
+	pubKeyHash := MustHexDecode(inp.Prevout.ScriptPubKey[4:])
+	scriptCode := make([]byte, 0, 25)
+	scriptCode = append(scriptCode, 0x19, 0x76, 0xa9, 0x14)
+	scriptCode = append(scriptCode, pubKeyHash...)
+	scriptCode = append(scriptCode, 0x88, 0xac)
+	return scriptCode
 }
 
 func SegwitSerializeAllAnyOne(tempTx Transaction, inp TxIn, sigHash []byte) []byte {
