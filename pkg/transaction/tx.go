@@ -19,7 +19,7 @@ const (
 	P2PK  Type = "p2pk"
 	P2PKH Type = "p2pkh"
 	P2SH  Type = "p2sh"
-	P2MS  Type = "p2ms"
+	P2MS  Type = "unknown"
 
 	// segwit
 	P2WPKH Type = "v0_p2wpkh"
