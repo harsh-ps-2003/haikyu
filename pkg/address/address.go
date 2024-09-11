@@ -15,9 +15,8 @@ import (
 	"golang.org/x/crypto/ripemd160"
 )
 
-// encodes given script into address
+// EncodeAddress encodes a given script into a Bitcoin address based on the script type.
 func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, error) {
-
 	script := strings.Split(scriptAsm, " ")
 	if len(script) == 0 {
 		return "", errors.New("invalid script")
@@ -25,6 +24,7 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 
 	switch script_type {
 	case transaction.P2PK:
+		// Handle Pay-to-PubKey (P2PK) script type
 		if len(script) != 3 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -33,7 +33,9 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 			return "", ierrors.ErrInvalidScript
 		}
 		return NewPayToPubKey(pubkey, script[0] == "OP_PUSHBYTES_33" && script[2] == "OP_CHECKSIG")
+
 	case transaction.P2PKH:
+		// Handle Pay-to-PubKeyHash (P2PKH) script type
 		if len(script) != 6 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -44,7 +46,9 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 		}
 
 		return NewPayToPubKeyHash(pubkeyHash)
+
 	case transaction.P2SH:
+		// Handle Pay-to-ScriptHash (P2SH) script type
 		if len(script) != 4 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -55,7 +59,9 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 		}
 
 		return NewPayToScriptHashFromScriptHash(pubkeyHash)
+
 	case transaction.P2WPKH:
+		// Handle Pay-to-Witness-PubKeyHash (P2WPKH) script type
 		if len(script) != 3 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -66,7 +72,9 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 		}
 
 		return NewPayToWitnessPubKeyHash(pubkeyHash)
+
 	case transaction.P2WSH:
+		// Handle Pay-to-Witness-ScriptHash (P2WSH) script type
 		if len(script) != 3 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -77,7 +85,9 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 		}
 
 		return NewPayToWitnessScriptHash(scriptHash)
+
 	case transaction.P2TR:
+		// Handle Pay-to-Taproot (P2TR) script type
 		if len(script) != 3 {
 			return "", ierrors.ErrInvalidScript
 		}
@@ -88,13 +98,17 @@ func EncodeAddress(scriptAsm string, script_type transaction.Type) (string, erro
 		}
 
 		return NewPayToTaproot(witnessProg)
+
 	case transaction.OP_RETURN_TYPE:
+		// Handle OP_RETURN script type, which does not encode to an address
 		return "", nil
 
 	case transaction.P2MS:
+		// Handle Pay-to-Multisig (P2MS) script type, currently not implemented
 		return "", nil
 
 	default:
+		// Handle invalid script types
 		return "", errors.New("invalid script type")
 	}
 }

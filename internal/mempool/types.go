@@ -94,14 +94,12 @@ func (t *Transaction) Fee() uint64 {
 	return fee
 }
 
-// Serialized tx structure (format LittleEndian)
-// - used to compute the txHash
 /*
 * Tx:
-* version (u32) ✅ + inputCount (compactSize) ✅
-* + [ fundingTxHash (u256) ✅ + voutIndex (u32) ✅ + ScriptSigSize (compactSize) ✅ + ScriptSig (bytes) ✅ + Sequence (u32) ✅ ]
-* + outputCount (compactSize) ✅
-* + [ amount (u64) ✅ + ScriptPubKeySize (compactSize) ✅ + ScriptPubKey (bytes) ✅]
+* version (u32) + inputCount (compactSize)
+* + [ fundingTxHash (u256) + voutIndex (u32) + ScriptSigSize (compactSize) + ScriptSig (bytes) + Sequence (u32) ]
+* + outputCount (compactSize)
+* + [ amount (u64) + ScriptPubKeySize (compactSize) + ScriptPubKey (bytes) ]
 * locktime (u32)
  */
 
